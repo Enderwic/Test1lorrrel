@@ -1,6 +1,7 @@
-import { useEffect, useRef, type CSSProperties } from "react";
+import { useEffect, useMemo, useRef, type CSSProperties } from "react";
 import { useSnakeGame, type SnakeGame } from "./game/useSnakeGame";
 import { initSfx } from "./game/audio";
+import { tgInit, tgUser } from "./game/telegram";
 import { GameCanvas } from "./components/GameCanvas";
 import { DPad } from "./components/DPad";
 import { BonusCard, ControlsPanel, DifficultyPanel, RecordsPanel } from "./components/Panels";
@@ -10,6 +11,7 @@ import {
   IconPlay,
   IconSoundOff,
   IconSoundOn,
+  IconTelegram,
   LogoSnake,
 } from "./components/icons";
 
@@ -148,6 +150,14 @@ function BoardFrame({
 export default function App() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const game = useSnakeGame(canvasRef);
+  const user = useMemo(() => tgUser(), []);
+
+  /* Telegram Mini Apps: ready/expand, цвет шапки, свайпы, вьюпорт, BackButton */
+  const backRef = useRef(game.onTgBack);
+  backRef.current = game.onTgBack;
+  useEffect(() => {
+    tgInit({ onBack: () => backRef.current() });
+  }, []);
 
   /* клавиатура */
   useEffect(() => {
@@ -226,11 +236,19 @@ export default function App() {
           <div className="flex items-center gap-3">
             <LogoSnake size={42} className="drop-shadow-[0_0_14px_rgba(168,232,48,0.45)]" />
             <div>
-              <div className="font-display text-xl font-black leading-none tracking-tight sm:text-2xl">
-                ЗМЕ<span className="text-lime">Й</span>КА
+              <div className="flex items-center gap-2">
+                <span className="font-display text-xl font-black leading-none tracking-tight sm:text-2xl">
+                  ЗМЕ<span className="text-lime">Й</span>КА
+                </span>
+                {game.tgMode && (
+                  <span className="flex items-center gap-1 rounded-full border border-teal/40 bg-teal/10 px-2 py-0.5 font-display text-[8px] font-bold uppercase tracking-[0.14em] text-teal">
+                    <IconTelegram size={11} />
+                    Mini App
+                  </span>
+                )}
               </div>
               <div className="mt-1 font-display text-[8px] font-bold uppercase tracking-[0.32em] text-teal sm:text-[9px]">
-                неоновый сад · аркада
+                {user ? `Привет, ${user.first_name} · неоновая аркада` : "неоновый сад · аркада"}
               </div>
             </div>
           </div>

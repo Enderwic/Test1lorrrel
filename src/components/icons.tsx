@@ -107,6 +107,22 @@ export function IconGamepad({ size, className }: IconProps) {
   );
 }
 
+export function IconTelegram({ size, className }: IconProps) {
+  return (
+    <svg {...base(size)} className={className}>
+      <path d="m21.9 4.6-3.2 14.9c-.2 1-.8 1.3-1.7.8l-4.8-3.5-2.3 2.2c-.3.3-.5.5-.9.5l.4-4.8L18.2 7c.4-.3-.1-.5-.6-.2L6.9 13.7l-4.6-1.4c-1-.3-1-1 .2-1.5l17.9-6.9c.8-.3 1.6.2 1.5 1.7Z" />
+    </svg>
+  );
+}
+
+export function IconCloud({ size, className }: IconProps) {
+  return (
+    <svg {...base(size)} className={className}>
+      <path d="M17.5 19a4.5 4.5 0 0 0 .4-9A6 6 0 0 0 6.2 11.3 4 4 0 0 0 7 19h10.5Z" />
+    </svg>
+  );
+}
+
 export function LogoSnake({ size = 40, className }: IconProps) {
   return (
     <svg width={size} height={size} viewBox="0 0 44 44" fill="none" className={className}>

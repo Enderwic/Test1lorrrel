@@ -1,6 +1,6 @@
 import { DIFFS, DIFF_ORDER } from "../game/core";
 import type { SnakeGame } from "../game/useSnakeGame";
-import { IconApple, IconGamepad, IconTrophy } from "./icons";
+import { IconApple, IconCloud, IconGamepad, IconTrophy } from "./icons";
 
 /* ---------- список сложностей (меню + правая панель) ---------- */
 export function DifficultyList({ game }: { game: SnakeGame }) {
@@ -118,7 +118,16 @@ export function RecordsPanel({ game }: { game: SnakeGame }) {
           <span className="font-display text-[13px] font-bold text-mint">{game.stats.apples}</span>
         </div>
       </div>
-      <p className="mt-2.5 text-[10px] text-fern/70">Сохраняются локально в вашем браузере.</p>
+      {game.tgMode ? (
+        <p className="mt-2.5 flex items-start gap-1.5 text-[10px] leading-relaxed text-fern/80">
+          <IconCloud size={13} className="mt-px shrink-0 text-teal" />
+          <span>
+            Синхронизация с Telegram Cloud — рекорды доступны на всех ваших устройствах.
+          </span>
+        </p>
+      ) : (
+        <p className="mt-2.5 text-[10px] text-fern/70">Сохраняются локально в вашем браузере.</p>
+      )}
     </section>
   );
 }

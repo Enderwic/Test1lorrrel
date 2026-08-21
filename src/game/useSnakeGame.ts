@@ -16,6 +16,15 @@ import {
 } from "./core";
 import { draw } from "./render";
 import { sfx, setSfxMuted, initSfx } from "./audio";
+import {
+  CLOUD_KEYS,
+  haptic,
+  isTelegram,
+  tgBackButton,
+  tgCloudLoad,
+  tgCloudSave,
+  tgMainButton,
+} from "./telegram";
 
 function lsGet(k: string, d = ""): string {
   try {
@@ -131,7 +140,10 @@ export function useSnakeGame(canvasRef: React.RefObject<HTMLCanvasElement>) {
     const h = w.snake[0];
     spawnBurst(w, h.x + 0.5, h.y + 0.5, ["#a8e830", "#7cc93e", "#ff6a4d", "#d8fb7e"], 26, 3.2);
     w.shake = 1;
-    if (!w.demo) sfx.die();
+    if (!w.demo) {
+      sfx.die();
+      haptic("die");
+    }
   }, []);
 
   const finalize = useCallback(
@@ -142,16 +154,22 @@ export function useSnakeGame(canvasRef: React.RefObject<HTMLCanvasElement>) {
       data.stats = { games: data.stats.games + 1, apples: data.stats.apples + w.eaten };
       lsSet("snake.games", data.stats.games);
       lsSet("snake.apples", data.stats.apples);
+      tgCloudSave(CLOUD_KEYS.games, data.stats.games);
+      tgCloudSave(CLOUD_KEYS.apples, data.stats.apples);
       setStats({ ...data.stats });
       if (rec && w.score > 0) {
         data.best = { ...data.best, [d]: w.score };
         lsSet(`snake.best.${d}`, w.score);
+        tgCloudSave(CLOUD_KEYS[`best${d[0].toUpperCase()}${d.slice(1)}` as keyof typeof CLOUD_KEYS], w.score);
         setBest(data.best);
         setNewRecord(true);
       }
       setPhaseAll("over");
       sfx.over();
-      if (rec && w.score > 0) window.setTimeout(() => sfx.record(), 550);
+      if (rec && w.score > 0) {
+        haptic("record");
+        window.setTimeout(() => sfx.record(), 550);
+      }
     },
     [setPhaseAll]
   );
@@ -203,10 +221,14 @@ export function useSnakeGame(canvasRef: React.RefObject<HTMLCanvasElement>) {
         w.stepMs = Math.max(cfg.minMs, w.stepMs - cfg.accel);
         if (w.eaten % 5 === 0 && !w.bonus) {
           w.bonus = { pos: randomFree([...w.snake, w.food]), born: now, ttl: 6500 };
-          if (!w.demo) sfx.bonusSpawn();
+          if (!w.demo) {
+            sfx.bonusSpawn();
+            haptic("bonus");
+          }
         }
         if (!w.demo) {
           sfx.eat();
+          haptic("eat");
           w.shake = Math.min(1, w.shake + 0.22);
           setScore(w.score);
           setApples(w.eaten);
@@ -223,6 +245,7 @@ export function useSnakeGame(canvasRef: React.RefObject<HTMLCanvasElement>) {
         w.bonus = null;
         if (!w.demo) {
           sfx.bonus();
+          haptic("bonus");
           w.shake = Math.min(1, w.shake + 0.4);
           setScore(w.score);
           setSnakeLen(w.snake.length);
@@ -336,6 +359,7 @@ export function useSnakeGame(canvasRef: React.RefObject<HTMLCanvasElement>) {
     setNewRecord(false);
     setPhaseAll("countdown");
     sfx.click();
+    haptic("start");
   }, [setPhaseAll]);
 
   const pause = useCallback(() => {
@@ -372,6 +396,7 @@ export function useSnakeGame(canvasRef: React.RefObject<HTMLCanvasElement>) {
     setDifficultyState(d);
     lsSet("snake.diff", d);
     sfx.click();
+    haptic("select");
   }, []);
 
   const input = useCallback((dx: number, dy: number) => {
@@ -383,6 +408,7 @@ export function useSnakeGame(canvasRef: React.RefObject<HTMLCanvasElement>) {
     if (dx === lastD.x && dy === lastD.y) return;
     if (w.queue.length >= 3) w.queue.shift();
     w.queue.push({ x: dx, y: dy });
+    if (ph === "playing") haptic("turn");
   }, []);
 
   const toggleMuted = useCallback(() => {
@@ -396,7 +422,67 @@ export function useSnakeGame(canvasRef: React.RefObject<HTMLCanvasElement>) {
     });
   }, []);
 
+  /* ---------- Telegram Mini Apps ---------- */
+  const tgMode = isTelegram();
+
+  /* системная кнопка «Назад»: в игре — пауза, иначе — в меню */
+  const onTgBack = useCallback(() => {
+    const ph = phaseRef.current;
+    if (ph === "playing") pause();
+    else if (ph === "countdown" || ph === "paused" || ph === "over") toMenu();
+  }, [pause, toMenu]);
+
+  /* нативные кнопки клиента Telegram следуют за фазой игры */
+  useEffect(() => {
+    if (!tgMode) return;
+    if (phase === "menu") tgMainButton("ИГРАТЬ", start);
+    else if (phase === "paused") tgMainButton("ПРОДОЛЖИТЬ", resume);
+    else if (phase === "over") tgMainButton("ЕЩЁ РАЗ", start);
+    else tgMainButton(null);
+    tgBackButton(phase !== "menu");
+  }, [tgMode, phase, start, resume]);
+
+  /* рекорды из Telegram CloudStorage (синхронизация между устройствами) */
+  useEffect(() => {
+    if (!tgMode) return;
+    let alive = true;
+    tgCloudLoad().then((remote) => {
+      if (!alive) return;
+      const data = dataRef.current;
+      const cloudBest: Record<Difficulty, number> = {
+        easy: remote[CLOUD_KEYS.bestEasy] ?? 0,
+        classic: remote[CLOUD_KEYS.bestClassic] ?? 0,
+        hard: remote[CLOUD_KEYS.bestHard] ?? 0,
+      };
+      const merged: Record<Difficulty, number> = {
+        easy: Math.max(data.best.easy, cloudBest.easy),
+        classic: Math.max(data.best.classic, cloudBest.classic),
+        hard: Math.max(data.best.hard, cloudBest.hard),
+      };
+      const games = Math.max(data.stats.games, remote[CLOUD_KEYS.games] ?? 0);
+      const applesTotal = Math.max(data.stats.apples, remote[CLOUD_KEYS.apples] ?? 0);
+      if (merged.easy !== data.best.easy || merged.classic !== data.best.classic || merged.hard !== data.best.hard) {
+        data.best = merged;
+        lsSet("snake.best.easy", merged.easy);
+        lsSet("snake.best.classic", merged.classic);
+        lsSet("snake.best.hard", merged.hard);
+        setBest(merged);
+      }
+      if (games !== data.stats.games || applesTotal !== data.stats.apples) {
+        data.stats = { games, apples: applesTotal };
+        lsSet("snake.games", games);
+        lsSet("snake.apples", applesTotal);
+        setStats(data.stats);
+      }
+    });
+    return () => {
+      alive = false;
+    };
+  }, [tgMode]);
+
   return {
+    tgMode,
+    onTgBack,
     phase,
     difficulty,
     score,

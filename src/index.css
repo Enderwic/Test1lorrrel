@@ -220,14 +220,16 @@ body {
 .diff-row:hover:not(.diff-off) { transform: translateX(3px); }
 .diff-off { opacity: 0.45; cursor: not-allowed; }
 
-/* размер игрового поля: на десктопе до 560px, на мобильных — вписывается под D-pad */
+/* размер игрового поля: на десктопе до 560px, на мобильных — вписывается под D-pad.
+   --tg-vh выставляется из Telegram WebApp.viewportStableHeight, чтобы поле
+   корректно помещалось под клавиатурой и нижней кнопкой клиента. */
 .board-size {
   width: 100%;
   max-width: min(100%, 560px);
 }
 @media (max-width: 767px) {
   .board-size {
-    max-width: min(100%, max(250px, calc(100dvh - 430px)));
+    max-width: min(100%, max(250px, calc(var(--tg-vh, 100dvh) - 430px)));
   }
 }
 
