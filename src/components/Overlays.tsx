@@ -50,6 +50,19 @@ export function FocusHud({ game }: { game: SnakeGame }) {
       <HudCell label="Рекорд" value={String(game.best[game.difficulty])} color="text-gold" />
       <HudCell label="Время" value={fmtTime(game.elapsedSec)} color="text-mint" />
       <div className="flex flex-col items-end">
+        <span className="panel-title !text-[8px]">Жизни</span>
+        <span className="mt-1 flex items-center gap-[3px]" aria-label={`Бонусных жизней: ${game.lives}`}>
+          {[0, 1].map((i) => (
+            <IconHeart
+              key={i}
+              size={11}
+              filled={i < game.lives}
+              className={i < game.lives ? "text-coral drop-shadow-[0_0_6px_rgba(255,106,77,0.8)]" : "text-mint/20"}
+            />
+          ))}
+        </span>
+      </div>
+      <div className="flex flex-col items-end">
         <span className="panel-title !text-[8px]">Скорость</span>
         <span className="mt-1 flex items-end gap-[2px]">
           {Array.from({ length: 8 }, (_, i) => (

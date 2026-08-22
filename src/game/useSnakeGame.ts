@@ -155,7 +155,7 @@ export function useSnakeGame(canvasRef: React.RefObject<HTMLCanvasElement>) {
   const [flash, setFlash] = useState(false);
   const [newRecord, setNewRecord] = useState(false);
   const [muted, setMutedState] = useState(() => lsGet("snake.muted", "0") === "1");
-  const [lives, setLives] = useState(1);
+  const [lives, setLives] = useState(0);
   const [elapsedSec, setElapsedSec] = useState(0);
   const [bonusLives, setBonusLives] = useState(0);
   const [refCount, setRefCount] = useState(0);
@@ -468,7 +468,9 @@ export function useSnakeGame(canvasRef: React.RefObject<HTMLCanvasElement>) {
     const d = diffRef.current;
     const cfg = resolveCfg(d, customRef.current);
     const grid = d === "custom" ? customRef.current.grid : DEFAULT_GRID;
-    const totalLives = 1 + bonusLivesRef.current;
+    /* w.lives — только БОНУСНЫЕ жизни (за рефералов). Базовая жизнь одна,
+       она не считается запасной: без рефералов continue не предлагается. */
+    const totalLives = bonusLivesRef.current;
     const w = createWorld(false, cfg, grid, grid, totalLives);
     w.countdownEnd = performance.now() + 1500;
     worldRef.current = w;
