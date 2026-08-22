@@ -1,7 +1,3 @@
-/* Статистика: fire-and-forget POST на Google Apps Script.
-   Plain JSON с Content-Type: text/plain → простой запрос без CORS-preflight.
-   Любые ошибки глотаются — игра никогда не блокируется сетью. */
-
 import { STATS_WEBHOOK_URL, type CustomCfg, type Difficulty, type ThemeId } from "./core";
 
 /* локальное чтение Telegram-пользователя без импорта telegram.ts (нет циклов) */
