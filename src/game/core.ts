@@ -1,11 +1,27 @@
 export type Pt = { x: number; y: number };
 
-export type Difficulty = "easy" | "classic" | "hard";
+export type Difficulty = "easy" | "classic" | "hard" | "custom";
 
-export type Phase = "menu" | "countdown" | "playing" | "paused" | "over";
+export type Phase = "menu" | "countdown" | "playing" | "paused" | "extraLife" | "over";
 
-export const COLS = 21;
-export const ROWS = 21;
+export type ThemeId = "neon" | "city" | "google";
+
+/* URL вебхука Google Apps Script (статистика + JSONP-эндпоинт рефералов) */
+export const STATS_WEBHOOK_URL =
+  "https://script.google.com/macros/s/AKfycbzqiIQskyorFQCn9zCSL3F8ZSBOFro33vqJQyjLpwzvYzva2AL0yJFBmCRymsxHnig/exec";
+
+export const DEFAULT_GRID = 21;
+export const GRID_OPTIONS = [15, 21, 27] as const;
+export const SPEED_MIN = 5; // шагов/сек (медленнее всего)
+export const SPEED_MAX = 16; // шагов/сек (быстрее всего)
+
+export interface CustomCfg {
+  baseMs: number;
+  accel: boolean;
+  grid: number;
+}
+
+export const DEFAULT_CUSTOM: CustomCfg = { baseMs: 110, accel: true, grid: DEFAULT_GRID };
 
 export interface DiffCfg {
   id: Difficulty;
@@ -19,12 +35,12 @@ export interface DiffCfg {
   mult: number;
 }
 
-export const DIFFS: Record<Difficulty, DiffCfg> = {
+export const DIFFS: Record<Exclude<Difficulty, "custom">, DiffCfg> = {
   easy: {
     id: "easy",
     label: "Новичок",
     tag: "×1 очки",
-    desc: "Спокойный темп · края поля замыкаются",
+    desc: "Спокойный темп · края замыкаются",
     baseMs: 150,
     minMs: 92,
     accel: 2.2,
@@ -55,7 +71,22 @@ export const DIFFS: Record<Difficulty, DiffCfg> = {
   },
 };
 
-export const DIFF_ORDER: Difficulty[] = ["easy", "classic", "hard"];
+export const DIFF_ORDER: Difficulty[] = ["easy", "classic", "hard", "custom"];
+
+export function resolveCfg(diff: Difficulty, custom: CustomCfg): DiffCfg {
+  if (diff !== "custom") return DIFFS[diff];
+  return {
+    id: "custom",
+    label: "Свой режим",
+    tag: "×2 очки",
+    desc: custom.accel ? "Ваш темп + разгон" : "Ваш темп · без разгона",
+    baseMs: custom.baseMs,
+    minMs: custom.accel ? Math.max(40, custom.baseMs - 70) : custom.baseMs,
+    accel: custom.accel ? 2.0 : 0,
+    walls: true,
+    mult: 2,
+  };
+}
 
 export interface Particle {
   x: number;
@@ -86,6 +117,9 @@ export interface Bonus {
 
 export interface World {
   demo: boolean;
+  cols: number;
+  rows: number;
+  cfg: DiffCfg;
   snake: Pt[];
   prev: Pt[];
   dir: Pt;
@@ -106,13 +140,17 @@ export interface World {
   diedAt: number;
   finalized: boolean;
   tongueUntil: number;
+  lives: number;
+  extraUsed: number;
+  invulnUntil: number;
+  elapsed: number;
 }
 
-export function randomFree(occupied: Pt[]): Pt {
+export function randomFree(occupied: Pt[], cols: number, rows: number): Pt {
   const taken = new Set(occupied.map((p) => `${p.x},${p.y}`));
   const free: Pt[] = [];
-  for (let y = 0; y < ROWS; y++) {
-    for (let x = 0; x < COLS; x++) {
+  for (let y = 0; y < rows; y++) {
+    for (let x = 0; x < cols; x++) {
       if (!taken.has(`${x},${y}`)) free.push({ x, y });
     }
   }
@@ -120,17 +158,30 @@ export function randomFree(occupied: Pt[]): Pt {
   return free[Math.floor(Math.random() * free.length)];
 }
 
-export function createWorld(demo: boolean, stepMs: number): World {
-  const cx = Math.floor(COLS / 2);
-  const cy = Math.floor(ROWS / 2);
+export function createWorld(
+  demo: boolean,
+  cfg: DiffCfg,
+  cols: number,
+  rows: number,
+  lives: number
+): World {
+  const cx = Math.floor(cols / 2);
+  const cy = Math.floor(rows / 2);
   const snake: Pt[] = [
     { x: cx + 1, y: cy },
     { x: cx, y: cy },
     { x: cx - 1, y: cy },
   ];
-  const food = randomFree([...snake, { x: cx + 2, y: cy }, { x: cx + 3, y: cy }]);
+  const food = randomFree(
+    [...snake, { x: cx + 2, y: cy }, { x: cx + 3, y: cy }],
+    cols,
+    rows
+  );
   return {
     demo,
+    cols,
+    rows,
+    cfg,
     snake,
     prev: snake.map((p) => ({ ...p })),
     dir: { x: 1, y: 0 },
@@ -141,7 +192,7 @@ export function createWorld(demo: boolean, stepMs: number): World {
     bonus: null,
     eaten: 0,
     score: 0,
-    stepMs,
+    stepMs: cfg.baseMs,
     lastStep: performance.now(),
     countdownEnd: 0,
     particles: [],
@@ -151,6 +202,10 @@ export function createWorld(demo: boolean, stepMs: number): World {
     diedAt: 0,
     finalized: false,
     tongueUntil: 0,
+    lives,
+    extraUsed: 0,
+    invulnUntil: 0,
+    elapsed: 0,
   };
 }
 
@@ -187,4 +242,10 @@ export function addFloater(w: World, x: number, y: number, text: string, color: 
 export function speedLevel(cfg: DiffCfg, stepMs: number): number {
   const ratio = (cfg.baseMs - stepMs) / Math.max(1, cfg.baseMs - cfg.minMs);
   return Math.max(1, Math.min(10, 1 + Math.round(ratio * 9)));
+}
+
+export function fmtTime(totalSec: number): string {
+  const m = Math.floor(totalSec / 60);
+  const s = totalSec % 60;
+  return `${m}:${String(s).padStart(2, "0")}`;
 }

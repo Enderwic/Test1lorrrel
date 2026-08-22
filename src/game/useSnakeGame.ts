@@ -1,31 +1,39 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  COLS,
-  ROWS,
-  DIFFS,
+  DEFAULT_CUSTOM,
+  DEFAULT_GRID,
+  resolveCfg,
   createWorld,
   randomFree,
   spawnBurst,
   addFloater,
   speedLevel,
+  type CustomCfg,
   type Difficulty,
-  type DiffCfg,
   type Phase,
   type Pt,
+  type ThemeId,
   type World,
 } from "./core";
+import { THEMES } from "./themes";
 import { draw } from "./render";
 import { sfx, setSfxMuted, initSfx } from "./audio";
 import {
   CLOUD_KEYS,
+  fetchReferralCount,
+  getMyId,
+  getRefParam,
   haptic,
   isTelegram,
   tgBackButton,
   tgCloudLoad,
   tgCloudSave,
+  tgCloudSetRaw,
+  tgInviteFriend,
   tgMainButton,
+  tgShareResult,
 } from "./telegram";
-import { sendGameOverStats, setStatsMode, trackSessionBest } from "./stats";
+import { statsApi, track } from "./stats";
 
 function lsGet(k: string, d = ""): string {
   try {
@@ -52,6 +60,7 @@ function loadBest(): Record<Difficulty, number> {
     easy: Number(lsGet("snake.best.easy", "0")) || 0,
     classic: Number(lsGet("snake.best.classic", "0")) || 0,
     hard: Number(lsGet("snake.best.hard", "0")) || 0,
+    custom: Number(lsGet("snake.best.custom", "0")) || 0,
   };
 }
 
@@ -62,7 +71,29 @@ function loadStats(): RunStats {
   };
 }
 
-function aiSteer(w: World, cfg: DiffCfg) {
+function loadCustom(): CustomCfg {
+  try {
+    const raw = JSON.parse(lsGet("snake.custom", "null")) as Partial<CustomCfg> | null;
+    if (raw && typeof raw.baseMs === "number") {
+      return {
+        baseMs: Math.max(60, Math.min(200, raw.baseMs)),
+        accel: raw.accel !== false,
+        grid: raw.grid === 15 || raw.grid === 27 ? raw.grid : DEFAULT_GRID,
+      };
+    }
+  } catch {
+    /* повреждённые настройки — берём дефолт */
+  }
+  return { ...DEFAULT_CUSTOM };
+}
+
+function loadTheme(): ThemeId {
+  const t = lsGet("snake.theme", "neon");
+  return t === "city" || t === "google" ? t : "neon";
+}
+
+function aiSteer(w: World) {
+  const cfg = w.cfg;
   const head = w.snake[0];
   const dirs: Pt[] = [
     w.dir,
@@ -73,10 +104,10 @@ function aiSteer(w: World, cfg: DiffCfg) {
     let nx = head.x + d.x;
     let ny = head.y + d.y;
     if (cfg.walls) {
-      if (nx < 0 || ny < 0 || nx >= COLS || ny >= ROWS) return false;
+      if (nx < 0 || ny < 0 || nx >= w.cols || ny >= w.rows) return false;
     } else {
-      nx = (nx + COLS) % COLS;
-      ny = (ny + ROWS) % ROWS;
+      nx = (nx + w.cols) % w.cols;
+      ny = (ny + w.rows) % w.rows;
     }
     for (let i = 0; i < w.snake.length - 1; i++) {
       if (w.snake[i].x === nx && w.snake[i].y === ny) return false;
@@ -87,11 +118,11 @@ function aiSteer(w: World, cfg: DiffCfg) {
     let nx = head.x + d.x;
     let ny = head.y + d.y;
     if (!cfg.walls) {
-      nx = (nx + COLS) % COLS;
-      ny = (ny + ROWS) % ROWS;
+      nx = (nx + w.cols) % w.cols;
+      ny = (ny + w.rows) % w.rows;
     }
-    const dx = Math.min(Math.abs(nx - w.food.x), COLS - Math.abs(nx - w.food.x));
-    const dy = Math.min(Math.abs(ny - w.food.y), ROWS - Math.abs(ny - w.food.y));
+    const dx = Math.min(Math.abs(nx - w.food.x), w.cols - Math.abs(nx - w.food.x));
+    const dy = Math.min(Math.abs(ny - w.food.y), w.rows - Math.abs(ny - w.food.y));
     return dx + dy;
   };
   const safe = dirs.filter(isSafe);
@@ -101,14 +132,19 @@ function aiSteer(w: World, cfg: DiffCfg) {
   if (!(pick.x === -w.dir.x && pick.y === -w.dir.y)) w.dir = pick;
 }
 
+const demoWorld = () =>
+  createWorld(true, resolveCfg("classic", DEFAULT_CUSTOM), DEFAULT_GRID, DEFAULT_GRID, 0);
+
 export function useSnakeGame(canvasRef: React.RefObject<HTMLCanvasElement>) {
   const dataRef = useRef({ best: loadBest(), stats: loadStats() });
 
   const [phase, setPhase] = useState<Phase>("menu");
   const [difficulty, setDifficultyState] = useState<Difficulty>(() => {
     const d = lsGet("snake.diff", "classic");
-    return d === "easy" || d === "hard" ? d : "classic";
+    return d === "easy" || d === "hard" || d === "custom" ? d : "classic";
   });
+  const [custom, setCustomState] = useState<CustomCfg>(loadCustom);
+  const [theme, setThemeState] = useState<ThemeId>(loadTheme);
   const [score, setScore] = useState(0);
   const [apples, setApples] = useState(0);
   const [snakeLen, setSnakeLen] = useState(3);
@@ -119,33 +155,52 @@ export function useSnakeGame(canvasRef: React.RefObject<HTMLCanvasElement>) {
   const [flash, setFlash] = useState(false);
   const [newRecord, setNewRecord] = useState(false);
   const [muted, setMutedState] = useState(() => lsGet("snake.muted", "0") === "1");
+  const [lives, setLives] = useState(1);
+  const [elapsedSec, setElapsedSec] = useState(0);
+  const [bonusLives, setBonusLives] = useState(0);
+  const [refCount, setRefCount] = useState(0);
 
   const phaseRef = useRef<Phase>("menu");
   const diffRef = useRef<Difficulty>(difficulty);
-  const worldRef = useRef<World>(createWorld(true, 110));
+  const customRef = useRef<CustomCfg>(custom);
+  const themeRef = useRef<ThemeId>(theme);
+  const bonusLivesRef = useRef(0);
+  const worldRef = useRef<World>(demoWorld());
   const countdownRef = useRef(-1);
   const flashTimer = useRef(0);
+  const lastElapsedRef = useRef(-1);
 
   const setPhaseAll = useCallback((p: Phase) => {
     phaseRef.current = p;
     setPhase(p);
   }, []);
 
+  /* синхронизация модуля статистики с настройками */
   useEffect(() => {
     setSfxMuted(lsGet("snake.muted", "0") === "1");
-    /* чтобы событие закрытия приложения знало актуальную сложность из localStorage */
-    setStatsMode(diffRef.current);
+    statsApi.setMode(diffRef.current);
+    statsApi.setTheme(themeRef.current);
+    statsApi.setCustom(diffRef.current === "custom" ? customRef.current : null);
   }, []);
 
-  const kill = useCallback((w: World, now: number) => {
-    w.dying = true;
-    w.diedAt = now;
-    const h = w.snake[0];
-    spawnBurst(w, h.x + 0.5, h.y + 0.5, ["#a8e830", "#7cc93e", "#ff6a4d", "#d8fb7e"], 26, 3.2);
-    w.shake = 1;
-    if (!w.demo) {
-      sfx.die();
-      haptic("die");
+  /* реферальный бонус: локальное значение сразу, серверное — как придёт */
+  useEffect(() => {
+    const myId = getMyId();
+    if (myId !== "unknown") {
+      const saved = Math.min(2, Number(lsGet(`snake.refBonus.${myId}`, "0")) || 0);
+      if (saved > 0) {
+        bonusLivesRef.current = saved;
+        setBonusLives(saved);
+      }
+      fetchReferralCount(myId).then((count) => {
+        if (count < 0) return; // сеть недоступна — живём с локальным
+        const bonus = Math.min(2, count);
+        bonusLivesRef.current = bonus;
+        setBonusLives(bonus);
+        setRefCount(count);
+        lsSet(`snake.refBonus.${myId}`, bonus);
+        tgCloudSetRaw(`snake_ref_bonus_${myId}`, String(bonus));
+      });
     }
   }, []);
 
@@ -163,13 +218,21 @@ export function useSnakeGame(canvasRef: React.RefObject<HTMLCanvasElement>) {
       if (rec && w.score > 0) {
         data.best = { ...data.best, [d]: w.score };
         lsSet(`snake.best.${d}`, w.score);
-        tgCloudSave(CLOUD_KEYS[`best${d[0].toUpperCase()}${d.slice(1)}` as keyof typeof CLOUD_KEYS], w.score);
+        tgCloudSave(
+          CLOUD_KEYS[`best${d[0].toUpperCase()}${d.slice(1)}` as keyof typeof CLOUD_KEYS],
+          w.score
+        );
         setBest(data.best);
         setNewRecord(true);
       }
-      /* статистика: каждая завершённая партия */
-      trackSessionBest(w.score);
-      sendGameOverStats(d);
+      /* статистика: лучший счёт сессии + активация реферала после первого финиша */
+      statsApi.bumpBest(w.score);
+      if (pendingRef && !lsGet("snake.refActivated")) {
+        lsSet("snake.refActivated", "1");
+        statsApi.setRefActivated(true);
+        track("referral_activated", { ref: pendingRef });
+      }
+      track("game_over", { extra_life_used: w.extraUsed, run_score: w.score, run_apples: w.eaten });
       setPhaseAll("over");
       sfx.over();
       if (rec && w.score > 0) {
@@ -177,13 +240,46 @@ export function useSnakeGame(canvasRef: React.RefObject<HTMLCanvasElement>) {
         window.setTimeout(() => sfx.record(), 550);
       }
     },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [setPhaseAll]
+  );
+
+  /* отложенный реферал: ?ref= в адресе + отсутствие локального флага активации */
+  const pendingRef = useMemo(() => {
+    const r = getRefParam();
+    if (!r) return null;
+    if (lsGet("snake.refActivated")) return null;
+    if (r === getMyId()) return null; // сам себя пригласить нельзя
+    return r;
+  }, []);
+
+  const kill = useCallback(
+    (w: World, now: number) => {
+      const h = w.snake[0];
+      spawnBurst(w, h.x + 0.5, h.y + 0.5, ["#a8e830", "#7cc93e", "#ff6a4d", "#d8fb7e"], 26, 3.2);
+      w.shake = 1;
+      if (!w.demo && w.lives > 0) {
+        /* есть запасная жизнь — предлагаем продолжить, змейка цела */
+        sfx.die();
+        haptic("die");
+        setLives(w.lives);
+        setPhaseAll("extraLife");
+        return;
+      }
+      w.dying = true;
+      w.diedAt = now;
+      if (!w.demo) {
+        sfx.die();
+        haptic("die");
+      }
+    },
     [setPhaseAll]
   );
 
   const doStep = useCallback(
     (w: World, now: number) => {
-      const cfg = w.demo ? DIFFS.classic : DIFFS[diffRef.current];
-      if (w.demo) aiSteer(w, cfg);
+      const cfg = w.cfg;
+      if (w.demo) aiSteer(w);
       if (w.queue.length) {
         const d = w.queue.shift()!;
         if (!(d.x === -w.dir.x && d.y === -w.dir.y) && !(d.x === w.dir.x && d.y === w.dir.y)) {
@@ -193,19 +289,25 @@ export function useSnakeGame(canvasRef: React.RefObject<HTMLCanvasElement>) {
       const head = w.snake[0];
       let nx = head.x + w.dir.x;
       let ny = head.y + w.dir.y;
+      const invuln = now < w.invulnUntil;
       if (cfg.walls) {
-        if (nx < 0 || ny < 0 || nx >= COLS || ny >= ROWS) {
-          kill(w, now);
-          return;
+        if (nx < 0 || ny < 0 || nx >= w.cols || ny >= w.rows) {
+          if (invuln) {
+            nx = (nx + w.cols) % w.cols;
+            ny = (ny + w.rows) % w.rows;
+          } else {
+            kill(w, now);
+            return;
+          }
         }
       } else {
-        nx = (nx + COLS) % COLS;
-        ny = (ny + ROWS) % ROWS;
+        nx = (nx + w.cols) % w.cols;
+        ny = (ny + w.rows) % w.rows;
       }
       const eatingFood = nx === w.food.x && ny === w.food.y;
       const willGrow = w.grow > 0 || eatingFood;
       const body = willGrow ? w.snake : w.snake.slice(0, -1);
-      if (body.some((s) => s.x === nx && s.y === ny)) {
+      if (!invuln && body.some((s) => s.x === nx && s.y === ny)) {
         kill(w, now);
         return;
       }
@@ -220,13 +322,14 @@ export function useSnakeGame(canvasRef: React.RefObject<HTMLCanvasElement>) {
         w.eaten += 1;
         w.grow += 1;
         w.tongueUntil = now + 550;
-        spawnBurst(w, nx + 0.5, ny + 0.5, ["#ff6a4d", "#ffc94a", "#a8e830"], 16, 2.4);
-        addFloater(w, nx, ny - 0.4, `+${pts}`, "#ffc94a");
-        w.food = randomFree([...w.snake, ...(w.bonus ? [w.bonus.pos] : [])]);
+        const th = THEMES[themeRef.current];
+        spawnBurst(w, nx + 0.5, ny + 0.5, th.foodParticles, 16, 2.4);
+        addFloater(w, nx, ny - 0.4, `+${pts}`, th.floatColor);
+        w.food = randomFree([...w.snake, ...(w.bonus ? [w.bonus.pos] : [])], w.cols, w.rows);
         w.foodSeed = Math.random() * 1000;
-        w.stepMs = Math.max(cfg.minMs, w.stepMs - cfg.accel);
+        if (cfg.accel > 0) w.stepMs = Math.max(cfg.minMs, w.stepMs - cfg.accel);
         if (w.eaten % 5 === 0 && !w.bonus) {
-          w.bonus = { pos: randomFree([...w.snake, w.food]), born: now, ttl: 6500 };
+          w.bonus = { pos: randomFree([...w.snake, w.food], w.cols, w.rows), born: now, ttl: 6500 };
           if (!w.demo) {
             sfx.bonusSpawn();
             haptic("bonus");
@@ -246,8 +349,9 @@ export function useSnakeGame(canvasRef: React.RefObject<HTMLCanvasElement>) {
         w.score += pts;
         w.grow += 2;
         w.tongueUntil = now + 550;
-        spawnBurst(w, nx + 0.5, ny + 0.5, ["#ffc94a", "#ffe9a8", "#ff9d2e"], 22, 3);
-        addFloater(w, nx, ny - 0.4, `+${pts}`, "#ffe9a8");
+        const th = THEMES[themeRef.current];
+        spawnBurst(w, nx + 0.5, ny + 0.5, th.bonusParticles, 22, 3);
+        addFloater(w, nx, ny - 0.4, `+${pts}`, th.floatColor);
         w.bonus = null;
         if (!w.demo) {
           sfx.bonus();
@@ -307,17 +411,26 @@ export function useSnakeGame(canvasRef: React.RefObject<HTMLCanvasElement>) {
         }
       }
 
+      if (ph === "playing") {
+        w.elapsed += dt;
+        const sec = Math.floor(w.elapsed / 1000);
+        if (sec !== lastElapsedRef.current) {
+          lastElapsedRef.current = sec;
+          setElapsedSec(sec);
+        }
+      }
+
       if ((ph === "playing" || ph === "menu") && !w.dying) {
         let guard = 0;
         while (now - w.lastStep >= w.stepMs && guard++ < 3) {
           doStep(w, now);
-          if (w.dying) break;
+          if (w.dying || phaseRef.current === "extraLife") break;
         }
       }
 
       if (w.dying && !w.finalized) {
         if (w.demo) {
-          if (now - w.diedAt > 600) worldRef.current = createWorld(true, 110);
+          if (now - w.diedAt > 600) worldRef.current = demoWorld();
         } else if (now - w.diedAt > 720) {
           w.finalized = true;
           finalize(w);
@@ -340,7 +453,7 @@ export function useSnakeGame(canvasRef: React.RefObject<HTMLCanvasElement>) {
       w.floaters = w.floaters.filter((f) => f.life > 0);
       w.shake = Math.max(0, w.shake - dt / 300);
 
-      draw(ctx, w, now, diffRef.current, size, dpr, ph);
+      draw(ctx, w, now, themeRef.current, size, dpr, ph);
     };
     raf = requestAnimationFrame(frame);
     return () => {
@@ -352,20 +465,28 @@ export function useSnakeGame(canvasRef: React.RefObject<HTMLCanvasElement>) {
   /* ---------- действия ---------- */
   const start = useCallback(() => {
     initSfx();
-    const cfg = DIFFS[diffRef.current];
-    const w = createWorld(false, cfg.baseMs);
+    const d = diffRef.current;
+    const cfg = resolveCfg(d, customRef.current);
+    const grid = d === "custom" ? customRef.current.grid : DEFAULT_GRID;
+    const totalLives = 1 + bonusLivesRef.current;
+    const w = createWorld(false, cfg, grid, grid, totalLives);
     w.countdownEnd = performance.now() + 1500;
     worldRef.current = w;
     countdownRef.current = -1;
+    lastElapsedRef.current = -1;
     setCountdown(3);
     setScore(0);
     setApples(0);
     setSnakeLen(3);
     setSpeed(1);
+    setLives(totalLives);
+    setElapsedSec(0);
     setNewRecord(false);
+    statsApi.setMode(d);
+    statsApi.setCustom(d === "custom" ? customRef.current : null);
+    statsApi.setExtraLifeUsed(0);
     setPhaseAll("countdown");
     sfx.click();
-    haptic("start");
   }, [setPhaseAll]);
 
   const pause = useCallback(() => {
@@ -389,19 +510,61 @@ export function useSnakeGame(canvasRef: React.RefObject<HTMLCanvasElement>) {
   }, [pause, resume]);
 
   const toMenu = useCallback(() => {
-    worldRef.current = createWorld(true, 110);
+    worldRef.current = demoWorld();
     setPhaseAll("menu");
     setScore(0);
     setNewRecord(false);
     sfx.click();
   }, [setPhaseAll]);
 
+  const continueRun = useCallback(() => {
+    if (phaseRef.current !== "extraLife") return;
+    const w = worldRef.current;
+    w.lives -= 1;
+    w.extraUsed += 1;
+    setLives(w.lives);
+    statsApi.setExtraLifeUsed(w.extraUsed);
+    w.dying = false;
+    w.invulnUntil = performance.now() + 1000;
+    w.lastStep = performance.now();
+    setPhaseAll("playing");
+    sfx.start();
+    haptic("start");
+  }, [setPhaseAll]);
+
+  const finishRun = useCallback(() => {
+    if (phaseRef.current !== "extraLife") return;
+    const w = worldRef.current;
+    w.dying = true;
+    w.finalized = true;
+    finalize(w);
+  }, [finalize]);
+
   const setDifficulty = useCallback((d: Difficulty) => {
     initSfx();
     diffRef.current = d;
     setDifficultyState(d);
-    setStatsMode(d);
     lsSet("snake.diff", d);
+    sfx.click();
+    haptic("select");
+  }, []);
+
+  const setCustom = useCallback((patch: Partial<CustomCfg>) => {
+    setCustomState((prev) => {
+      const next = { ...prev, ...patch };
+      customRef.current = next;
+      lsSet("snake.custom", JSON.stringify(next));
+      if (diffRef.current === "custom") statsApi.setCustom(next);
+      return next;
+    });
+  }, []);
+
+  const setTheme = useCallback((t: ThemeId) => {
+    themeRef.current = t;
+    setThemeState(t);
+    lsSet("snake.theme", t);
+    statsApi.setTheme(t);
+    initSfx();
     sfx.click();
     haptic("select");
   }, []);
@@ -415,7 +578,7 @@ export function useSnakeGame(canvasRef: React.RefObject<HTMLCanvasElement>) {
     if (dx === lastD.x && dy === lastD.y) return;
     if (w.queue.length >= 3) w.queue.shift();
     w.queue.push({ x: dx, y: dy });
-    if (ph === "playing") haptic("turn");
+    haptic("turn");
   }, []);
 
   const toggleMuted = useCallback(() => {
@@ -429,15 +592,32 @@ export function useSnakeGame(canvasRef: React.RefObject<HTMLCanvasElement>) {
     });
   }, []);
 
+  const shareResult = useCallback(() => {
+    initSfx();
+    sfx.click();
+    tgShareResult(score);
+    statsApi.bumpShares();
+    track("share_click", { source: "result" });
+  }, [score]);
+
+  const inviteFriend = useCallback(() => {
+    initSfx();
+    sfx.click();
+    tgInviteFriend();
+    track("share_click", { source: "invite" });
+  }, []);
+
   /* ---------- Telegram Mini Apps ---------- */
   const tgMode = isTelegram();
 
-  /* системная кнопка «Назад»: в игре — пауза, иначе — в меню */
+  /* системная кнопка «Назад» */
   const onTgBack = useCallback(() => {
     const ph = phaseRef.current;
     if (ph === "playing") pause();
-    else if (ph === "countdown" || ph === "paused" || ph === "over") toMenu();
-  }, [pause, toMenu]);
+    else if (ph === "countdown") toMenu();
+    else if (ph === "extraLife") finishRun();
+    else if (ph === "paused" || ph === "over") toMenu();
+  }, [pause, toMenu, finishRun]);
 
   /* нативные кнопки клиента Telegram следуют за фазой игры */
   useEffect(() => {
@@ -445,9 +625,10 @@ export function useSnakeGame(canvasRef: React.RefObject<HTMLCanvasElement>) {
     if (phase === "menu") tgMainButton("ИГРАТЬ", start);
     else if (phase === "paused") tgMainButton("ПРОДОЛЖИТЬ", resume);
     else if (phase === "over") tgMainButton("ЕЩЁ РАЗ", start);
+    else if (phase === "extraLife") tgMainButton("ПРОДОЛЖИТЬ", continueRun);
     else tgMainButton(null);
     tgBackButton(phase !== "menu");
-  }, [tgMode, phase, start, resume]);
+  }, [tgMode, phase, start, resume, continueRun]);
 
   /* рекорды из Telegram CloudStorage (синхронизация между устройствами) */
   useEffect(() => {
@@ -460,19 +641,27 @@ export function useSnakeGame(canvasRef: React.RefObject<HTMLCanvasElement>) {
         easy: remote[CLOUD_KEYS.bestEasy] ?? 0,
         classic: remote[CLOUD_KEYS.bestClassic] ?? 0,
         hard: remote[CLOUD_KEYS.bestHard] ?? 0,
+        custom: remote[CLOUD_KEYS.bestCustom] ?? 0,
       };
       const merged: Record<Difficulty, number> = {
         easy: Math.max(data.best.easy, cloudBest.easy),
         classic: Math.max(data.best.classic, cloudBest.classic),
         hard: Math.max(data.best.hard, cloudBest.hard),
+        custom: Math.max(data.best.custom, cloudBest.custom),
       };
       const games = Math.max(data.stats.games, remote[CLOUD_KEYS.games] ?? 0);
       const applesTotal = Math.max(data.stats.apples, remote[CLOUD_KEYS.apples] ?? 0);
-      if (merged.easy !== data.best.easy || merged.classic !== data.best.classic || merged.hard !== data.best.hard) {
+      if (
+        merged.easy !== data.best.easy ||
+        merged.classic !== data.best.classic ||
+        merged.hard !== data.best.hard ||
+        merged.custom !== data.best.custom
+      ) {
         data.best = merged;
         lsSet("snake.best.easy", merged.easy);
         lsSet("snake.best.classic", merged.classic);
         lsSet("snake.best.hard", merged.hard);
+        lsSet("snake.best.custom", merged.custom);
         setBest(merged);
       }
       if (games !== data.stats.games || applesTotal !== data.stats.apples) {
@@ -488,10 +677,10 @@ export function useSnakeGame(canvasRef: React.RefObject<HTMLCanvasElement>) {
   }, [tgMode]);
 
   return {
-    tgMode,
-    onTgBack,
     phase,
     difficulty,
+    custom,
+    theme,
     score,
     apples,
     snakeLen,
@@ -502,14 +691,26 @@ export function useSnakeGame(canvasRef: React.RefObject<HTMLCanvasElement>) {
     flash,
     newRecord,
     muted,
+    lives,
+    elapsedSec,
+    bonusLives,
+    refCount,
+    tgMode,
+    onTgBack,
     start,
     pause,
     resume,
     togglePause,
     toMenu,
+    continueRun,
+    finishRun,
     setDifficulty,
+    setCustom,
+    setTheme,
     input,
     toggleMuted,
+    shareResult,
+    inviteFriend,
   };
 }
 

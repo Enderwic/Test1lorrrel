@@ -14,6 +14,10 @@
   --font-body: "Manrope", ui-sans-serif, system-ui, sans-serif;
 }
 
+:root {
+  --tg-vh: 100dvh;
+}
+
 html,
 body,
 #root {
@@ -27,6 +31,8 @@ body {
   font-family: var(--font-body);
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
+  overscroll-behavior: none;
+  -webkit-tap-highlight-color: transparent;
 }
 
 /* ---------- keyframes ---------- */
@@ -102,6 +108,14 @@ body {
   background-size: 42px 42px;
   mask-image: radial-gradient(ellipse 90% 72% at 50% 36%, black 25%, transparent 78%);
   -webkit-mask-image: radial-gradient(ellipse 90% 72% at 50% 36%, black 25%, transparent 78%);
+}
+
+/* ---------- layout: safe-area + dvh ---------- */
+.app-pad {
+  padding-top: max(14px, env(safe-area-inset-top));
+  padding-bottom: max(16px, env(safe-area-inset-bottom));
+  padding-left: max(16px, env(safe-area-inset-left));
+  padding-right: max(16px, env(safe-area-inset-right));
 }
 
 /* ---------- components ---------- */
@@ -195,23 +209,6 @@ body {
   color: #eaf7ed;
 }
 
-.dpad-btn {
-  touch-action: none;
-  border: 1px solid rgba(234, 247, 237, 0.12);
-  background: linear-gradient(180deg, rgba(32, 62, 47, 0.85), rgba(13, 30, 22, 0.92));
-  color: #cfe9d6;
-  transition: all 0.12s ease;
-  cursor: pointer;
-}
-.dpad-btn:active {
-  background: rgba(168, 232, 48, 0.24);
-  border-color: rgba(168, 232, 48, 0.75);
-  color: #d9ff8f;
-  box-shadow: 0 0 18px rgba(168, 232, 48, 0.35);
-  transform: scale(0.93);
-}
-.dpad-btn:disabled { opacity: 0.35; }
-
 .diff-row {
   transition: all 0.18s cubic-bezier(0.22, 1, 0.36, 1);
   cursor: pointer;
@@ -220,7 +217,77 @@ body {
 .diff-row:hover:not(.diff-off) { transform: translateX(3px); }
 .diff-off { opacity: 0.45; cursor: not-allowed; }
 
-/* размер игрового поля: на десктопе до 560px, на мобильных — вписывается под D-pad.
+/* ---------- слайдер скорости ---------- */
+.slider {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 22px;
+  background: transparent;
+  cursor: pointer;
+}
+.slider::-webkit-slider-runnable-track {
+  height: 6px;
+  border-radius: 999px;
+  background: linear-gradient(90deg, rgba(59, 214, 176, 0.55), rgba(168, 232, 48, 0.55));
+}
+.slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  margin-top: -6px;
+  width: 18px;
+  height: 18px;
+  border-radius: 999px;
+  background: #3bd6b0;
+  border: 3px solid #0d251b;
+  box-shadow: 0 0 12px rgba(59, 214, 176, 0.7);
+}
+.slider::-moz-range-track {
+  height: 6px;
+  border-radius: 999px;
+  background: linear-gradient(90deg, rgba(59, 214, 176, 0.55), rgba(168, 232, 48, 0.55));
+}
+.slider::-moz-range-thumb {
+  width: 15px;
+  height: 15px;
+  border-radius: 999px;
+  background: #3bd6b0;
+  border: 3px solid #0d251b;
+  box-shadow: 0 0 12px rgba(59, 214, 176, 0.7);
+}
+
+/* ---------- переключатель ---------- */
+.switch {
+  position: relative;
+  display: inline-block;
+  width: 40px;
+  height: 22px;
+  border-radius: 999px;
+  border: 1px solid rgba(234, 247, 237, 0.16);
+  background: rgba(234, 247, 237, 0.08);
+  transition: background 0.2s, border-color 0.2s;
+  flex-shrink: 0;
+}
+.switch-dot {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 16px;
+  height: 16px;
+  border-radius: 999px;
+  background: #8fbba5;
+  transition: transform 0.2s cubic-bezier(0.22, 1, 0.36, 1), background 0.2s;
+}
+.switch-on {
+  background: rgba(168, 232, 48, 0.25);
+  border-color: rgba(168, 232, 48, 0.6);
+}
+.switch-on .switch-dot {
+  transform: translateX(18px);
+  background: #a8e830;
+  box-shadow: 0 0 10px rgba(168, 232, 48, 0.8);
+}
+
+/* ---------- размер игрового поля ----------
    --tg-vh выставляется из Telegram WebApp.viewportStableHeight, чтобы поле
    корректно помещалось под клавиатурой и нижней кнопкой клиента. */
 .board-size {
@@ -229,7 +296,12 @@ body {
 }
 @media (max-width: 767px) {
   .board-size {
-    max-width: min(100%, max(250px, calc(var(--tg-vh, 100dvh) - 430px)));
+    max-width: min(100%, max(240px, calc(var(--tg-vh, 100dvh) - 330px)));
   }
 }
-
+/* короткие ландшафты (телефон на боку, Telegram Desktop с низкой высотой) */
+@media (orientation: landscape) and (max-height: 520px) {
+  .board-size {
+    max-width: min(100%, calc(100dvh - 150px));
+  }
+}
