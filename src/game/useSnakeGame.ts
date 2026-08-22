@@ -25,6 +25,7 @@ import {
   tgCloudSave,
   tgMainButton,
 } from "./telegram";
+import { sendGameOverStats, setStatsMode, trackSessionBest } from "./stats";
 
 function lsGet(k: string, d = ""): string {
   try {
@@ -132,6 +133,8 @@ export function useSnakeGame(canvasRef: React.RefObject<HTMLCanvasElement>) {
 
   useEffect(() => {
     setSfxMuted(lsGet("snake.muted", "0") === "1");
+    /* чтобы событие закрытия приложения знало актуальную сложность из localStorage */
+    setStatsMode(diffRef.current);
   }, []);
 
   const kill = useCallback((w: World, now: number) => {
@@ -164,6 +167,9 @@ export function useSnakeGame(canvasRef: React.RefObject<HTMLCanvasElement>) {
         setBest(data.best);
         setNewRecord(true);
       }
+      /* статистика: каждая завершённая партия */
+      trackSessionBest(w.score);
+      sendGameOverStats(d);
       setPhaseAll("over");
       sfx.over();
       if (rec && w.score > 0) {
@@ -394,6 +400,7 @@ export function useSnakeGame(canvasRef: React.RefObject<HTMLCanvasElement>) {
     initSfx();
     diffRef.current = d;
     setDifficultyState(d);
+    setStatsMode(d);
     lsSet("snake.diff", d);
     sfx.click();
     haptic("select");
