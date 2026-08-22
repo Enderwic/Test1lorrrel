@@ -1,10 +1,18 @@
 import { useEffect, useMemo, useRef, type CSSProperties } from "react";
-import { useSnakeGame, type SnakeGame } from "./game/useSnakeGame";
+import { useSnakeGame } from "./game/useSnakeGame";
 import { initSfx } from "./game/audio";
+import { initStats } from "./game/stats";
 import { tgInit, tgUser } from "./game/telegram";
 import { GameCanvas } from "./components/GameCanvas";
-import { DPad } from "./components/DPad";
-import { BonusCard, ControlsPanel, DifficultyPanel, RecordsPanel } from "./components/Panels";
+import { FocusHud } from "./components/Overlays";
+import {
+  BonusCard,
+  ControlsPanel,
+  DifficultyPanel,
+  InvitePanel,
+  RecordsPanel,
+  ThemePanel,
+} from "./components/Panels";
 import {
   IconHome,
   IconPause,
@@ -27,8 +35,6 @@ const FIREFLIES = [
   { left: "73%", size: 3, color: "#3bd6b0", dur: 24, delay: 1, fo: 0.5, fx: "-36px" },
   { left: "82%", size: 5, color: "#a8e830", dur: 20, delay: 8, fo: 0.5, fx: "28px" },
   { left: "90%", size: 3, color: "#ffc94a", dur: 18, delay: 11, fo: 0.45, fx: "-20px" },
-  { left: "50%", size: 4, color: "#a8e830", dur: 26, delay: 15, fo: 0.35, fx: "18px" },
-  { left: "38%", size: 3, color: "#3bd6b0", dur: 15, delay: 5, fo: 0.5, fx: "-16px" },
 ];
 
 function Ambient() {
@@ -64,58 +70,9 @@ function Ambient() {
       <div
         className="absolute inset-0"
         style={{
-          background:
-            "radial-gradient(ellipse at 50% 45%, transparent 55%, rgba(4,12,8,0.5) 100%)",
+          background: "radial-gradient(ellipse at 50% 45%, transparent 55%, rgba(4,12,8,0.5) 100%)",
         }}
       />
-    </div>
-  );
-}
-
-/* ---------- табло ---------- */
-function Hud({ game }: { game: SnakeGame }) {
-  return (
-    <div className="panel flex w-full items-stretch divide-x divide-mint/10 py-2">
-      <div className="flex-1 px-3 text-center sm:px-4 sm:text-left">
-        <div className="panel-title">Счёт</div>
-        <div
-          key={game.score}
-          className="anim-pop font-display text-2xl font-black leading-tight text-lime"
-        >
-          {game.score}
-        </div>
-      </div>
-      <div className="flex-1 px-3 text-center sm:px-4">
-        <div className="panel-title">Рекорд</div>
-        <div className="font-display text-2xl font-black leading-tight text-gold">
-          {game.best[game.difficulty]}
-        </div>
-      </div>
-      <div className="hidden flex-1 px-3 text-center sm:block sm:px-4">
-        <div className="panel-title">Длина</div>
-        <div className="font-display text-2xl font-black leading-tight text-mint">
-          {game.snakeLen}
-        </div>
-      </div>
-      <div className="flex-1 px-3 text-center sm:px-4">
-        <div className="panel-title">Скорость</div>
-        <div className="mt-2 flex items-end justify-center gap-[3px] sm:justify-start">
-          {Array.from({ length: 10 }, (_, i) => (
-            <span
-              key={i}
-              className={`h-3 w-[5px] rounded-sm transition-colors duration-300 ${
-                i < game.speed
-                  ? i < 4
-                    ? "bg-lime"
-                    : i < 7
-                      ? "bg-gold"
-                      : "bg-coral"
-                  : "bg-mint/10"
-              }`}
-            />
-          ))}
-        </div>
-      </div>
     </div>
   );
 }
@@ -125,7 +82,7 @@ function BoardFrame({
   game,
   canvasRef,
 }: {
-  game: SnakeGame;
+  game: ReturnType<typeof useSnakeGame>;
   canvasRef: React.RefObject<HTMLCanvasElement>;
 }) {
   return (
@@ -152,14 +109,15 @@ export default function App() {
   const game = useSnakeGame(canvasRef);
   const user = useMemo(() => tgUser(), []);
 
-  /* Telegram Mini Apps: ready/expand, цвет шапки, свайпы, вьюпорт, BackButton */
+  /* Telegram Mini Apps + статистика: инициализация один раз */
   const backRef = useRef(game.onTgBack);
   backRef.current = game.onTgBack;
   useEffect(() => {
     tgInit({ onBack: () => backRef.current() });
+    initStats();
   }, []);
 
-  /* клавиатура */
+  /* клавиатура (десктоп) */
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const c = e.code;
@@ -187,14 +145,17 @@ export default function App() {
         case "Space":
           if (game.phase === "playing") game.pause();
           else if (game.phase === "paused") game.resume();
+          else if (game.phase === "extraLife") game.continueRun();
           else if (game.phase === "menu" || game.phase === "over") game.start();
           break;
         case "Enter":
           if (game.phase === "menu" || game.phase === "over") game.start();
+          else if (game.phase === "extraLife") game.continueRun();
           break;
         case "KeyP":
         case "Escape":
-          game.togglePause();
+          if (game.phase === "extraLife") game.finishRun();
+          else game.togglePause();
           break;
         case "KeyR":
           if (game.phase !== "menu") game.start();
@@ -224,35 +185,53 @@ export default function App() {
     };
   }, []);
 
-  const inRun = game.phase === "playing" || game.phase === "countdown" || game.phase === "paused";
+  /* фокус-режим: во время игры — только поле и минимальный HUD */
+  const focus = game.phase === "playing";
+
+  if (focus) {
+    return (
+      <div className="app-pad relative flex min-h-[100dvh] flex-col items-center justify-center font-body text-mint">
+        <div className="board-size flex w-full flex-col gap-2">
+          <FocusHud game={game} />
+          <BoardFrame game={game} canvasRef={canvasRef} />
+          <p className="text-center text-[10px] text-fern/70">
+            <span className="hidden md:inline">
+              <span className="kbd px-2">Space</span> — пауза · стрелки / WASD — движение
+            </span>
+            <span className="md:hidden">свайп — поворот · тап — пауза</span>
+          </p>
+        </div>
+      </div>
+    );
+  }
 
   return (
-    <div className="relative min-h-full font-body text-mint">
+    <div className="app-pad relative min-h-[100dvh] font-body text-mint">
       <Ambient />
 
-      <div className="relative z-10 mx-auto flex min-h-screen max-w-6xl flex-col px-4 pb-5 pt-4 sm:pt-6">
+      <div className="relative z-10 mx-auto flex min-h-[100dvh] max-w-6xl flex-col pt-1 pb-2">
         {/* шапка */}
-        <header className="mb-4 flex items-center justify-between gap-3 sm:mb-6">
-          <div className="flex items-center gap-3">
-            <LogoSnake size={42} className="drop-shadow-[0_0_14px_rgba(168,232,48,0.45)]" />
+        <header className="mb-3 flex items-center justify-between gap-3 sm:mb-5">
+          <div className="flex items-center gap-2.5 sm:gap-3">
+            <LogoSnake size={38} className="drop-shadow-[0_0_14px_rgba(168,232,48,0.45)] sm:h-[42px] sm:w-[42px]" />
             <div>
               <div className="flex items-center gap-2">
-                <span className="font-display text-xl font-black leading-none tracking-tight sm:text-2xl">
+                <span className="font-display text-[clamp(17px,4.6vw,24px)] font-black leading-none tracking-tight">
                   ЗМЕ<span className="text-lime">Й</span>КА
                 </span>
                 {game.tgMode && (
-                  <span className="flex items-center gap-1 rounded-full border border-teal/40 bg-teal/10 px-2 py-0.5 font-display text-[8px] font-bold uppercase tracking-[0.14em] text-teal">
+                  <span className="hidden items-center gap-1 rounded-full border border-teal/40 bg-teal/10 px-2 py-0.5 font-display text-[8px] font-bold uppercase tracking-[0.14em] text-teal min-[380px]:flex">
                     <IconTelegram size={11} />
                     Mini App
                   </span>
                 )}
               </div>
-              <div className="mt-1 font-display text-[8px] font-bold uppercase tracking-[0.32em] text-teal sm:text-[9px]">
-                {user ? `Привет, ${user.first_name} · неоновая аркада` : "неоновый сад · аркада"}
+              <div className="mt-1 font-display text-[8px] font-bold uppercase tracking-[0.28em] text-teal sm:text-[9px]">
+                {user ? `Привет, ${user.first_name}` : "неоновый сад · аркада"}
               </div>
             </div>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-1.5 sm:gap-2">
             <button
               type="button"
               className="btn btn-icon"
@@ -286,41 +265,31 @@ export default function App() {
         </header>
 
         {/* основная сетка */}
-        <main className="grid flex-1 items-start gap-5 lg:grid-cols-[272px_minmax(0,1fr)_280px]">
-          <aside className="hidden flex-col gap-4 lg:flex">
+        <main className="grid flex-1 items-start gap-4 lg:grid-cols-[264px_minmax(0,1fr)_280px] lg:gap-5">
+          <aside className="order-2 hidden flex-col gap-4 lg:order-1 lg:flex">
             <ControlsPanel />
             <BonusCard />
           </aside>
 
-          <section className="flex flex-col items-center gap-4">
-            <div className="board-size">
-              <Hud game={game} />
-            </div>
+          <section className="relative z-10 order-1 flex flex-col items-center gap-3 lg:order-2 lg:gap-4">
             <div className="board-size">
               <BoardFrame game={game} canvasRef={canvasRef} />
             </div>
-            <DPad game={game} />
+            <p className="text-center text-[10px] text-fern/70 lg:hidden">
+              свайп — поворот · тап по полю — пауза
+            </p>
           </section>
 
-          <aside className="flex flex-col gap-4">
+          <aside className="order-3 flex flex-col gap-3 sm:gap-4 lg:order-3">
             <DifficultyPanel game={game} />
+            <ThemePanel game={game} />
+            <InvitePanel game={game} />
             <RecordsPanel game={game} />
-            {!inRun && (
-              <div className="panel p-4 lg:hidden">
-                <h3 className="panel-title mb-2">Управление</h3>
-                <p className="text-[11px] leading-relaxed text-fern">
-                  Свайпы по полю или стрелки под ним. Пауза — кнопка в центре крестовины. На
-                  клавиатуре: <span className="kbd">W</span> <span className="kbd">A</span>{" "}
-                  <span className="kbd">S</span> <span className="kbd">D</span>,{" "}
-                  <span className="kbd px-2">Space</span> — пауза.
-                </p>
-              </div>
-            )}
           </aside>
         </main>
 
-        {/* подсказки */}
-        <footer className="mt-6 flex flex-wrap items-center justify-center gap-x-4 gap-y-1.5 text-[11px] text-fern">
+        {/* подсказки (только десктоп) */}
+        <footer className="mt-5 hidden flex-wrap items-center justify-center gap-x-4 gap-y-1.5 pb-1 text-[11px] text-fern md:flex">
           <span className="flex items-center gap-1.5">
             <span className="kbd px-2">Space</span> пауза
           </span>

@@ -1,6 +1,8 @@
 /* Интеграция Telegram Mini Apps SDK (telegram-web-app.js).
    Вне Telegram все методы — безопасные заглушки, игра работает как обычно. */
 
+import { STATS_WEBHOOK_URL } from "./core";
+
 export interface TgUser {
   id: number;
   first_name: string;
@@ -46,7 +48,7 @@ interface TelegramWebApp {
   platform?: string;
   colorScheme?: "light" | "dark";
   initData?: string;
-  initDataUnsafe?: { user?: TgUser; query_id?: string };
+  initDataUnsafe?: { user?: TgUser; query_id?: string; start_param?: string };
   themeParams?: Record<string, string>;
   viewportHeight?: number;
   viewportStableHeight?: number;
@@ -58,6 +60,8 @@ interface TelegramWebApp {
   setBackgroundColor?(color: string): void;
   setBottomBarColor?(color: string): void;
   disableVerticalSwipes?(): void;
+  switchInlineChat?(text: string, chatTypes?: string[]): void;
+  openTelegramLink?(url: string): void;
   onEvent?(event: string, cb: () => void): void;
 }
 
@@ -72,7 +76,6 @@ export function tg(): TelegramWebApp | null {
   return window.Telegram?.WebApp ?? null;
 }
 
-/* Скрипт SDK присутствует только внутри клиентов Telegram (или при локальной отладке с ним) */
 export function isTelegram(): boolean {
   return tg() !== null;
 }
@@ -81,8 +84,9 @@ export function tgUser(): TgUser | null {
   return tg()?.initDataUnsafe?.user ?? null;
 }
 
-export function tgPlatform(): string {
-  return tg()?.platform ?? "web";
+export function getMyId(): string {
+  const id = tgUser()?.id;
+  return id != null ? String(id) : "unknown";
 }
 
 function applyViewport() {
@@ -116,7 +120,6 @@ export function tgInit(handlers: TgHandlers = {}) {
     /* окраска шапки доступна не везде */
   }
   try {
-    /* вертикальные свайпы управляют змейкой — не даём им закрывать мини-приложение */
     w.disableVerticalSwipes?.();
   } catch {
     /* метод появился в Bot API 7.8, на старых клиентах просто нет */
@@ -211,6 +214,7 @@ export const CLOUD_KEYS = {
   bestEasy: "snake_best_easy",
   bestClassic: "snake_best_classic",
   bestHard: "snake_best_hard",
+  bestCustom: "snake_best_custom",
   games: "snake_stats_games",
   apples: "snake_stats_apples",
 } as const;
@@ -231,7 +235,6 @@ export function tgCloudLoad(): Promise<Record<string, number>> {
       settled = true;
       resolve(out);
     };
-    /* страховка: не ждём облако дольше 2,5 секунд */
     window.setTimeout(finish, 2500);
     keys.forEach((k) => {
       try {
@@ -249,7 +252,6 @@ export function tgCloudLoad(): Promise<Record<string, number>> {
   });
 }
 
-/* CloudStorage лимитирует частоту записи, поэтому батчим по ключу */
 const saveTimers = new Map<string, number>();
 
 export function tgCloudSave(key: string, value: number) {
@@ -267,4 +269,129 @@ export function tgCloudSave(key: string, value: number) {
       }
     }, 1200)
   );
+}
+
+export function tgCloudSetRaw(key: string, value: string) {
+  try {
+    tg()?.CloudStorage?.setItem(key, value);
+  } catch {
+    /* ignore */
+  }
+}
+
+/* ---------- шаринг и рефералы ---------- */
+
+export function getAppUrl(): string {
+  try {
+    return `${window.location.origin}${window.location.pathname}`;
+  } catch {
+    return "";
+  }
+}
+
+export function buildRefLink(): string {
+  const id = getMyId();
+  return `${getAppUrl()}?ref=${id}`;
+}
+
+/* ?ref= из URL или start_param из Telegram deep-link */
+export function getRefParam(): string | null {
+  try {
+    const sp = tg()?.initDataUnsafe?.start_param ?? "";
+    if (sp) {
+      const cleaned = sp.replace(/^ref[_-]?/i, "");
+      if (/^\d+$/.test(cleaned)) return cleaned;
+      if (/^\d+$/.test(sp)) return sp;
+    }
+    const q = new URLSearchParams(window.location.search).get("ref");
+    if (q && q !== "undefined") return q;
+  } catch {
+    /* ignore */
+  }
+  return null;
+}
+
+function shareVia(text: string, link: string) {
+  const w = tg();
+  // 1) нативный выбор чата внутри Telegram
+  if (w?.switchInlineChat) {
+    try {
+      w.switchInlineChat(`${text} ${link}`, ["users", "groups", "channels"]);
+      return;
+    } catch {
+      /* пробуем дальше */
+    }
+  }
+  // 2) классический share-диалог Telegram
+  const shareUrl = `https://t.me/share/url?url=${encodeURIComponent(link)}&text=${encodeURIComponent(text)}`;
+  if (w?.openTelegramLink) {
+    try {
+      w.openTelegramLink(shareUrl);
+      return;
+    } catch {
+      /* и дальше */
+    }
+  }
+  // 3) вне Telegram — системный/браузерный шаринг
+  try {
+    const nav = navigator as Navigator & { share?: (d: { text: string; url: string }) => Promise<void> };
+    if (nav.share) {
+      nav.share({ text, url: link }).catch(() => {});
+      return;
+    }
+  } catch {
+    /* ignore */
+  }
+  try {
+    window.open(shareUrl, "_blank", "noopener");
+  } catch {
+    /* ignore */
+  }
+}
+
+export function tgShareResult(score: number) {
+  const text = `Хей, присоединяйся ко мне в игру! Я набрал ${score} очков в змейке 🐍 Сколько сможешь ты?`;
+  shareVia(text, buildRefLink());
+}
+
+export function tgInviteFriend() {
+  const text = "Хей, присоединяйся ко мне в игру! Гоняем в неоновую змейку 🐍";
+  shareVia(text, buildRefLink());
+}
+
+/* ---------- JSONP-запрос к Apps Script: число активированных рефералов ---------- */
+
+export function fetchReferralCount(id: string): Promise<number> {
+  return new Promise((resolve) => {
+    let done = false;
+    const cbName = `__snakeRefCb${Date.now()}_${Math.floor(Math.random() * 1e5)}`;
+    const w = window as unknown as Record<string, unknown>;
+
+    const finish = (v: number) => {
+      if (done) return;
+      done = true;
+      try {
+        delete w[cbName];
+      } catch {
+        /* ignore */
+      }
+      script.remove();
+      resolve(v);
+    };
+
+    const timer = window.setTimeout(() => finish(-1), 4000);
+    w[cbName] = (data: { count?: unknown }) => {
+      window.clearTimeout(timer);
+      const n = Number(data?.count);
+      finish(Number.isFinite(n) && n >= 0 ? n : 0);
+    };
+
+    const script = document.createElement("script");
+    script.src = `${STATS_WEBHOOK_URL}?action=refcount&id=${encodeURIComponent(id)}&cb=${cbName}`;
+    script.onerror = () => {
+      window.clearTimeout(timer);
+      finish(-1);
+    };
+    document.head.appendChild(script);
+  });
 }

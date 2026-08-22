@@ -1,70 +1,99 @@
-/* Простая статистика fire-and-forget: финиш партии и закрытие приложения
-   отправляются в Google Apps Script. Тело — plain JSON с Content-Type: text/plain
-   (простой запрос без CORS-preflight, ответ непрозрачный). Лбая ошибка глотается:
-   статистика никогда не должна мешать игре. */
+import { STATS_WEBHOOK_URL, type CustomCfg, type Difficulty, type ThemeId } from "./core";
 
-import { tgUser } from "./telegram";
-import type { Difficulty } from "./core";
-
-const STATS_URL =
-  "https://script.google.com/macros/s/AKfycbzqiIQskyorFQCn9zCSL3F8ZSBOFro33vqJQyjLpwzvYzva2AL0yJFBmCRymsxHnig/exec";
-
-const openedAt = Date.now();
-let currentMode = "classic";
-let sessionBest = 0;
-let lastCloseSentAt = 0;
-
-/* актуальная сложность — для события закрытия приложения */
-export function setStatsMode(mode: Difficulty) {
-  currentMode = mode;
-}
-
-/* лучший счёт текущей сессии (максимум по всем сыгранным партиям) */
-export function trackSessionBest(score: number) {
-  if (score > sessionBest) sessionBest = score;
-}
-
-function fire(mode: string, keepalive: boolean) {
-  /* защита от двойного «закрытия»: visibilitychange + pagehide подряд */
-  if (keepalive) {
-    const now = Date.now();
-    if (now - lastCloseSentAt < 2500) return;
-    lastCloseSentAt = now;
-  }
-  const user = tgUser();
-  const payload = JSON.stringify({
-    telegram_id: user?.id ?? "unknown",
-    first_name: user?.first_name ?? "unknown",
-    mode,
-    score: sessionBest,
-    session_sec: Math.round((Date.now() - openedAt) / 1000),
-  });
+/* локальное чтение Telegram-пользователя без импорта telegram.ts (нет циклов) */
+function tgUserLocal(): { id?: number; first_name?: string } | null {
   try {
-    void fetch(STATS_URL, {
+    return window.Telegram?.WebApp?.initDataUnsafe?.user ?? null;
+  } catch {
+    return null;
+  }
+}
+
+const t0 = Date.now();
+
+let mode: Difficulty = "classic";
+let theme: ThemeId = "neon";
+let custom: CustomCfg | null = null;
+let shares = 0;
+let extraLifeUsed = 0;
+let refActivated = false;
+let sessionBest = 0;
+
+export const statsApi = {
+  setMode(m: Difficulty) {
+    mode = m;
+  },
+  setTheme(t: ThemeId) {
+    theme = t;
+  },
+  setCustom(c: CustomCfg | null) {
+    custom = c;
+  },
+  setExtraLifeUsed(n: number) {
+    extraLifeUsed = n;
+  },
+  setRefActivated(v: boolean) {
+    refActivated = v;
+  },
+  bumpShares() {
+    shares += 1;
+  },
+  bumpBest(score: number) {
+    if (score > sessionBest) sessionBest = score;
+  },
+  getMode(): Difficulty {
+    return mode;
+  },
+};
+
+export type StatsEvent = "game_over" | "page_hide" | "share_click" | "referral_activated";
+
+export function track(event: StatsEvent, extra: Record<string, unknown> = {}) {
+  try {
+    const user = tgUserLocal();
+    const payload: Record<string, unknown> = {
+      event,
+      telegram_id: user?.id ?? "unknown",
+      first_name: user?.first_name ?? "unknown",
+      mode,
+      theme,
+      score: sessionBest,
+      session_sec: Math.round((Date.now() - t0) / 1000),
+      shares,
+      extra_life_used: extraLifeUsed,
+      referral_activated: refActivated ? 1 : 0,
+    };
+    if (custom && mode === "custom") {
+      payload.custom_speed_ms = custom.baseMs;
+      payload.custom_accel = custom.accel ? 1 : 0;
+      payload.custom_grid = custom.grid;
+    }
+    Object.assign(payload, extra);
+    fetch(STATS_WEBHOOK_URL, {
       method: "POST",
       mode: "no-cors",
+      keepalive: true,
       headers: { "Content-Type": "text/plain;charset=UTF-8" },
-      body: payload,
-      keepalive,
-    }).catch(() => {
-      /* молча */
-    });
+      body: JSON.stringify(payload),
+    }).catch(() => {});
   } catch {
-    /* молча */
+    /* статистика не должна ломать игру */
   }
 }
 
-/* 1) каждый финиш партии */
-export function sendGameOverStats(mode: Difficulty) {
-  fire(mode, false);
-}
+let hideSentAt = 0;
 
-/* 2) скрытие страницы / закрытие приложения — с keepalive, чтобы запрос
-   успел уйти даже при мгновенном закрытии вьюпорта */
-if (typeof window !== "undefined") {
-  const onClose = () => fire(currentMode, true);
-  window.addEventListener("pagehide", onClose);
-  document.addEventListener("visibilitychange", () => {
-    if (document.hidden) onClose();
-  });
+/* подписки на скрытие страницы / закрытие мини-приложения (keepalive внутри track) */
+export function initStats() {
+  const send = () => {
+    const now = Date.now();
+    if (now - hideSentAt < 2500) return; // защита от двойного срабатывания
+    hideSentAt = now;
+    track("page_hide");
+  };
+  const onVis = () => {
+    if (document.visibilityState === "hidden") send();
+  };
+  document.addEventListener("visibilitychange", onVis);
+  window.addEventListener("pagehide", send);
 }
